@@ -13,6 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#include <fcntl.h>
 #ifdef __MINGW32__
 #include <ctype.h>
 #endif
@@ -23,6 +24,7 @@
 #include "memory.h"
 #include "video.h"
 #include "via.h"
+#include "uart.h"
 #include "serial.h"
 #include "i2c.h"
 #include "rtc.h"
@@ -507,6 +509,7 @@ main(int argc, char **argv)
 	char *prg_path = NULL;
 	char *bas_path = NULL;
 	char *sdcard_path = NULL;
+        char *uart_path = NULL;
 	bool run_test = false;
 	int test_number = 0;
 	int audio_buffers = 8;
@@ -639,6 +642,17 @@ main(int argc, char **argv)
 			cartridge_new();
 			cartridge_define_bank_range(32, 255, CART_BANK_UNINITIALIZED_RAM);
 			cartridge_import_files(argv, 1, 32, CART_BANK_INITIALIZED_RAM, 0);
+			argc--;
+			argv++;
+		} else if (!strcmp(argv[0], "-uart")) {
+                  // TODO expand this to be able to open multiple
+                  // UARTs and connect them to specific spots in memory
+			argc--;
+			argv++;
+			if (!argc || argv[0][0] == '-') {
+				usage();
+			}
+			uart_path = argv[0];
 			argc--;
 			argv++;
 		} else if (!strcmp(argv[0], "-warp")) {
@@ -1043,6 +1057,19 @@ main(int argc, char **argv)
 		SDL_RWclose(bas_file);
 	}
 
+        if (uart_path) {
+          // TODO expand this to be able to take additional configuration
+          // io=X        CX16 standard IO port, start at base addr
+          // mem=0x0000  memory addr to live at
+          // clock=Hz    clock frequency; default 1.8432MHz
+          // uart=type   kind of UART to emulate
+          // path        file or whatever to open
+          //             could expand this to opening TCP ports?
+          int fd = open(uart_path, O_RDWR|O_NOCTTY);
+          // NOTE currently forced to "16550" but you could switch it
+          uart = make_uart(fd, pc16550);
+        }
+        
 	if (run_test) {
 		paste_text = paste_text_data;
 		snprintf(paste_text, sizeof(paste_text_data), "TEST %d\r", test_number);
@@ -1452,6 +1479,8 @@ emulator_loop(void *param)
 		old_clockticks6502 = clockticks6502;
 		bool new_frame = false;
 		via1_step(clocks);
+                if(uart)
+                  uart_step(uart, MHZ, clocks);
 		vera_spi_step(clocks);
 		if (has_serial) {
 			serial_step(clocks);

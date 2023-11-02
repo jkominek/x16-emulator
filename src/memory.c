@@ -9,6 +9,7 @@
 #include <time.h>
 #include "glue.h"
 #include "via.h"
+#include "uart.h"
 #include "memory.h"
 #include "video.h"
 #include "ymglue.h"
@@ -161,6 +162,9 @@ real_read6502(uint16_t address, bool debugOn, uint8_t bank)
 				return YM_read_status();
 			}
 			return 0x9f; // open bus read
+                } else if (address >= 0x9f80 && address < 0x9fa0 && uart) {
+                  // IO4 UART
+                  return uart_read(uart, address & 0xf, debugOn);
 		} else if (address >= 0x9fb0 && address < 0x9fc0) {
 			// emulator state
 			return emu_read(address & 0xf, debugOn);
@@ -229,6 +233,9 @@ write6502(uint16_t address, uint8_t value)
 				audio_render();
 				YM_write_reg(addr_ym, value);
 			}
+                } else if (address >= 0x9f80 && address < 0x9fa0 && uart) {
+                        // IO4 UART
+                        uart_write(uart, address & 0xf, value);
 		} else if (address >= 0x9fb0 && address < 0x9fc0) {
 			// emulator state
 			emu_write(address & 0xf, value);
