@@ -41,6 +41,7 @@ pc16550_init(uart_16550_t *uart)
 	uart->rcvr_fifo_trigger_level = 1;
 	// the 16550 derivatives only have a buffer if you turn it on.
 	uart->txbufsize = uart->rxbufsize = 1;
+        uart->txbuflevel = uart->rxbuflevel = 0;
 
 	// defaults for LCR
 	pc16550_write(uart, 0x7, 0x00);
@@ -52,14 +53,23 @@ pc16550_read(uart_16550_t *uart, uint8_t reg, bool debug)
 	switch (reg) {
 		case 0: {
 			// receiver buffer register
-			uint8_t buf;
-			int     ret = read(uart->base.fd, &buf, 1);
-			// we could check for errors, but, eh.
-			if (ret > 0) {
-				return buf;
-			} else {
-				return 0;
-			}
+                        if(uart->fifo_enabled) {
+                          // they get the last value we had
+                          // whether it was good or not
+                          uint8_t value = uart->rxbuffer[0];
+                          if(uart->rxbuflevel>0) {
+                            // if it was a legit read, then move
+                            // the fifo along
+                            uart->rxbuflevel--;
+                            memmove(uart->rxbuffer, uart->rxbuffer+1, uart->rxbuflevel);
+                          }
+                          return value;
+                        } else {
+                          // just return the shift register,
+                          // regardless of whether the value is
+                          // good or not
+                          return uart->base.rx_sr;
+                        }
 		} break;
 		case 1: {
 			// interrupt enable register
@@ -123,9 +133,16 @@ pc16550_write(uart_16550_t *uart, uint8_t reg, uint8_t value)
 				break;
 			}
 			// transmitter holding register
-			int ret = write(uart->base.fd, &value, 1);
-			if (ret != 1) {
-				// err
+                        if(uart->fifo_enabled) {
+                          if(uart->txbuflevel<(uart->txbufsize-1)) {
+                            uart->txbuffer[uart->txbuflevel++] = value;
+                          }
+                          // TODO not sure what real parts do when the FIFO
+                          // is full, but for now we're just going to drop the
+                          // write on the floor.
+                        } else {
+                          uart->base.tx_sr = value;
+                          uart->base.tx_sr_has_value = 1;
 			}
 		} break;
 		case 1: {
@@ -143,8 +160,9 @@ pc16550_write(uart_16550_t *uart, uint8_t reg, uint8_t value)
 			if (value & 0x1) {
 				// fifo on
 				uart->fifo_enabled = 1;
-				uart->txbufsize    = 64;
-				uart->rxbufsize    = 64;
+                                int bufsize = (uart->base.type==sc16752) ? 64 : 16;
+				uart->txbufsize    = bufsize;
+				uart->rxbufsize    = bufsize;
 				reset_rx           = (value & 0x2);
 				reset_tx           = (value & 0x4);
 				switch ((value & 0xc0) >> 6) {
@@ -156,8 +174,8 @@ pc16550_write(uart_16550_t *uart, uint8_t reg, uint8_t value)
 			} else {
 				// fifo off
 				uart->fifo_enabled = 0;
-				uart->txbufsize    = 1;
-				uart->rxbufsize    = 1;
+				uart->txbufsize    = 0;
+				uart->rxbufsize    = 0;
 				// clear both buffers
 				reset_rx = 1;
 				reset_tx = 1;
@@ -165,8 +183,12 @@ pc16550_write(uart_16550_t *uart, uint8_t reg, uint8_t value)
 				uart->rcvr_fifo_trigger_level = 1;
 			}
 			if (reset_rx) {
+                          bzero(uart->rxbuffer, 64);
+                          uart->rxbuflevel = 0;
 			}
 			if (reset_tx) {
+                          bzero(uart->txbuffer, 64);
+                          uart->txbuflevel = 0;
 			}
 		} break;
 		case 3: {
@@ -245,6 +267,22 @@ pc16550_io_update(uart_16550_t *uart, bool rx_io, bool tx_io)
 {
 	// populate tx_sr, pull from rx_sr
 	// check errors, update interrupts
+  if((!uart->base.tx_sr_has_value) && (uart->txbuflevel>0)) {
+    // We can move a byte out of the tx buffer
+    uart->base.tx_sr = uart->txbuffer[0];
+    uart->base.tx_sr_has_value = 1;
+    uart->txbuflevel--;
+    memmove(uart->txbuffer, uart->txbuffer+1, uart->txbuflevel);
+  }
+
+  if((uart->base.rx_sr_has_value) && (uart->rxbuflevel<(uart->rxbufsize-1))) {
+    // if there's space we move something out of the rx shift register
+    uart->rxbuffer[uart->rxbuflevel] = uart->base.rx_sr;
+    uart->base.rx_sr_has_value = 0;
+    uart->rxbuflevel++;
+  }
+
+  // TODO get in some logic for the interrupts
 }
 
 void
@@ -393,6 +431,7 @@ w6551_io_update(uart_6551_t *uart, bool rx_io, bool tx_io)
 	//      also changes in them cause an unconditional IRQ
 
 	// NOTE W65C51 transmit IRQ is actually busted.
+        // maybe want to be able to emulate that?
 	if ((((uart->command & CMD_TXCTRL) >> 2) == 1) && (!uart->base.tx_sr_has_value) && tx_io)
 		uart->status |= STATUS_INT;
 	if ((uart->command & CMD_RXINT) && (!uart->base.rx_sr_has_value) && rx_io)
@@ -415,6 +454,7 @@ make_uart(int fd, uart_type_t type)
 	}
 	uart->fd       = fd;
 	uart->type     = type;
+        // make the clock configurable
 	uart->clock_hz = 1843200;
 
 	uart->ns_accumulated  = 0;
@@ -469,6 +509,11 @@ void
 uart_step(uart_t *uart, uint8_t MHZ, unsigned clocks)
 {
 	bool tx_io = false, rx_io = false;
+
+        if(uart->baud_rate == 0) {
+          // UART is basically off, and can't do anything useful
+          return;
+        }
 
 	// worth trying to optimize some of these calculations?
 	uint64_t ns_elapsed = clocks * 1000 / MHZ;

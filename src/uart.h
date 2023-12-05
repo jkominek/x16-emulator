@@ -87,10 +87,13 @@ typedef struct {
 	// divisor latch is stored in baud_rate_divisor
 
 	// buffers
+        // bytes enter the buffer at [buflevel] and exit at [0]
 	bool    fifo_enabled;
 	uint8_t rcvr_fifo_trigger_level;
 	uint8_t txbufsize;
 	uint8_t rxbufsize;
+        uint8_t txbuflevel;
+        uint8_t rxbuflevel;
 	uint8_t txbuffer[64];
 	uint8_t rxbuffer[64];
 } uart_16550_t;
